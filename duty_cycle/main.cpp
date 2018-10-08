@@ -35,12 +35,6 @@ struct CycleTracker
         return (end_ - start_) * works_;
     }
 
-    uint64_t saturation(uint64_t s, uint64_t e)
-    {
-        saturation_ += e-s;
-        return saturation_;
-    }
-
     float saturationCycles()
     {
         if (saturation_)
@@ -124,21 +118,26 @@ int main ( int argc, char* argv[] )
     {
         CycleTracker::CheckPoint cp(ct);
         cp.markOne();
-        __builtin_ia32_pause(); // on failed poll
+        if (!(i%3)) 
+        {
+            __builtin_ia32_pause(); // on failed poll
+            cp.markTwo();
+            continue;
+        }
         cp.markTwo();
-        if (!(i%3)) continue;
+
         for(int k = 0; k < 200; ++k)
             getcc_ns();
         cp.markThree();
     }
     ct.end();
 
+    std::cout << "Sizeof CycleTracker = " << sizeof(CycleTracker) << std::endl;
     std::cout << "Overhead = " << ct.overhead_ << std::endl;
     std::cout << "Duty = " << ct.saturation_ << std::endl;
-    std::cout << "Sizeof CycleTracker = " << sizeof(CycleTracker) << std::endl;
 
     std::cout << "work saturation [Cycles] = " << ct.saturationCycles() << std::endl;
-    std::cout << "work saturation [Ratio] = " << ct.saturationRatio() << std::endl;
-    std::cout << "Bandwidht [work/ms] = " << ct.bandwidth() / (3.0 * 1'000'000) << std::endl;
+    std::cout << "ratio saturation [Ratio] = " << ct.saturationRatio() << std::endl;
+    std::cout << "Bandwidth [work/ms] = " << ct.bandwidth() / (3.0 * 1'000'000) << std::endl;
 	return 0;
 }
