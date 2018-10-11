@@ -238,7 +238,7 @@ int main ( int argc, char* argv[] )
         work = atoi(argv[1]);
     }
 
-    constexpr int nThreads = 10;
+    constexpr int nThreads = 3;
     std::array<std::unique_ptr<std::thread>, nThreads> threads;
 
     // this ends up being the point of contention
@@ -262,7 +262,9 @@ int main ( int argc, char* argv[] )
             r[i] = cts[i].get().getResults();
         }
 
-        for ( int i = 0; i < 10; ++i)
+		uint64_t totalBandwidth{0};
+
+        for ( int i = 0; i < nThreads; ++i)
         {
 
             std::cout << "Sizeof CycleTracker = " << sizeof(CycleTracker) << std::endl;
@@ -272,9 +274,11 @@ int main ( int argc, char* argv[] )
             std::cout << "saturation [Cycles] = " << static_cast<float>(r[i].saturationCycles_)/g_precision << std::endl;
             std::cout << "saturation [Ratio] =  " << static_cast<float>(r[i].saturationRatio_)/g_precision << std::endl;
             std::cout << "Bandwidth [work/ms] = " << static_cast<float>(r[i].bandwidth_)  << std::endl;
+			totalBandwidth += r[i].bandwidth_;
 
-            std::cout << "----" << std::endl << std::endl;
         }
+		std::cout << "Total Bandwidth = " << totalBandwidth << std::endl;
+		std::cout << "----" << std::endl << std::endl;
     }
 
   	return 0;

@@ -1,0 +1,107 @@
+--- /usr/include/boost/lockfree/queue.hpp	2017-12-29 10:21:03.032687947 +0000
++++ bad_queue.hpp	2018-05-05 13:33:06.111160862 +0000
+@@ -8,8 +8,8 @@
+ //  accompanying file LICENSE_1_0.txt or copy at
+ //  http://www.boost.org/LICENSE_1_0.txt)
+ 
+-#ifndef BOOST_LOCKFREE_FIFO_HPP_INCLUDED
+-#define BOOST_LOCKFREE_FIFO_HPP_INCLUDED
++#ifndef BAD_BOOST_LOCKFREE_FIFO_HPP_INCLUDED
++#define BAD_BOOST_LOCKFREE_FIFO_HPP_INCLUDED
+ 
+ #include <boost/assert.hpp>
+ #include <boost/static_assert.hpp>
+@@ -77,7 +77,7 @@
+ #else
+ template <typename T, typename ...Options>
+ #endif
+-class queue
++class bad_queue
+ {
+ private:
+ #ifndef BOOST_DOXYGEN_INVOKED
+@@ -102,7 +102,7 @@
+     static const bool node_based = !(has_capacity || fixed_sized);
+     static const bool compile_time_sized = has_capacity;
+ 
+-    struct BOOST_ALIGNMENT(BOOST_LOCKFREE_CACHELINE_BYTES) node
++    struct node
+     {
+         typedef typename detail::select_tagged_handle<node, node_based>::tagged_handle_type tagged_node_handle;
+         typedef typename detail::select_tagged_handle<node, node_based>::handle_type handle_type;
+@@ -148,8 +148,8 @@
+ 
+ #endif
+ 
+-    BOOST_DELETED_FUNCTION(queue(queue const&))
+-    BOOST_DELETED_FUNCTION(queue& operator= (queue const&))
++    BOOST_DELETED_FUNCTION(bad_queue(bad_queue const&))
++    BOOST_DELETED_FUNCTION(bad_queue& operator= (bad_queue const&))
+ 
+ public:
+     typedef T value_type;
+@@ -171,7 +171,7 @@
+ 
+     //! Construct queue
+     // @{
+-    queue(void):
++    bad_queue(void):
+         head_(tagged_node_handle(0, 0)),
+         tail_(tagged_node_handle(0, 0)),
+         pool(node_allocator(), capacity)
+@@ -181,7 +181,7 @@
+     }
+ 
+     template <typename U>
+-    explicit queue(typename node_allocator::template rebind<U>::other const & alloc):
++    explicit bad_queue(typename node_allocator::template rebind<U>::other const & alloc):
+         head_(tagged_node_handle(0, 0)),
+         tail_(tagged_node_handle(0, 0)),
+         pool(alloc, capacity)
+@@ -190,7 +190,7 @@
+         initialize();
+     }
+ 
+-    explicit queue(allocator const & alloc):
++    explicit bad_queue(allocator const & alloc):
+         head_(tagged_node_handle(0, 0)),
+         tail_(tagged_node_handle(0, 0)),
+         pool(alloc, capacity)
+@@ -202,7 +202,7 @@
+ 
+     //! Construct queue, allocate n nodes for the freelist.
+     // @{
+-    explicit queue(size_type n):
++    explicit bad_queue(size_type n):
+         head_(tagged_node_handle(0, 0)),
+         tail_(tagged_node_handle(0, 0)),
+         pool(node_allocator(), n + 1)
+@@ -212,7 +212,7 @@
+     }
+ 
+     template <typename U>
+-    queue(size_type n, typename node_allocator::template rebind<U>::other const & alloc):
++    bad_queue(size_type n, typename node_allocator::template rebind<U>::other const & alloc):
+         head_(tagged_node_handle(0, 0)),
+         tail_(tagged_node_handle(0, 0)),
+         pool(alloc, n + 1)
+@@ -238,7 +238,7 @@
+ 
+     /** Destroys queue, free all nodes from freelist.
+      * */
+-    ~queue(void)
++    ~bad_queue(void)
+     {
+         T dummy;
+         while(unsynchronized_pop(dummy))
+@@ -532,10 +532,7 @@
+ private:
+ #ifndef BOOST_DOXYGEN_INVOKED
+     atomic<tagged_node_handle> head_;
+-    static const int padding_size = BOOST_LOCKFREE_CACHELINE_BYTES - sizeof(tagged_node_handle);
+-    char padding1[padding_size];
+     atomic<tagged_node_handle> tail_;
+-    char padding2[padding_size];
+ 
+     pool_t pool;
+ #endif
