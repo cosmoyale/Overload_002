@@ -22,9 +22,9 @@ struct Alignment
 struct Results
 {
     Results() {}
+    uint32_t bandwidth_{0}; // return raw messages per result?
     uint16_t saturationCycles_{0};
     uint16_t saturationRatio_{0};
-    uint32_t bandwidth_{0}; // return raw messages per result?
 };
 
 union ResultsSync
@@ -242,7 +242,7 @@ int main ( int argc, char* argv[] )
     std::array<std::unique_ptr<std::thread>, nThreads> threads;
 
     // this ends up being the point of contention
-    constexpr int align = 64;
+    constexpr int align = 8;
     std::array<Alignment<CycleTracker, align>, nThreads> cts;
 
     for (int i = 0; i < nThreads; ++i)
@@ -264,12 +264,13 @@ int main ( int argc, char* argv[] )
 
 		uint64_t totalBandwidth{0};
 
+		std::cout << "Sizeof CycleTracker = " << sizeof(CycleTracker) << std::endl;
+		std::cout << "Sizeof Results = " << sizeof(Results) << std::endl;
+		std::cout << "Sizeof align = " << align << std::endl;
+           
         for ( int i = 0; i < nThreads; ++i)
         {
 
-            std::cout << "Sizeof CycleTracker = " << sizeof(CycleTracker) << std::endl;
-            std::cout << "Sizeof Results = " << sizeof(Results) << std::endl;
-           
             // need to make fetcher methods to hide the g_precision and ugly static_cast
             std::cout << "saturation [Cycles] = " << static_cast<float>(r[i].saturationCycles_)/g_precision << std::endl;
             std::cout << "saturation [Ratio] =  " << static_cast<float>(r[i].saturationRatio_)/g_precision << std::endl;
