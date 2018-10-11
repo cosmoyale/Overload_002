@@ -1,6 +1,8 @@
 #include <iostream>
 #include <atomic>
 #include <thread>
+#include <vector>
+#include <array>
 #include <unistd.h>
 
 #include "getcc.h"
@@ -8,13 +10,21 @@
 //
 
 constexpr uint32_t g_precision = 10000;
+
+template <typename T, int X>
+struct Alignment
+{
+    alignas(X) T t_;
+    T& get() { return t_; }
+    operator T () {return t_;}
+};
+
 struct Results
 {
-
     Results() {}
     uint16_t saturationCycles_{0};
     uint16_t saturationRatio_{0};
-    uint32_t bandwidth_{0}; // return raw messages per time quantum or break down in to Kila,Mega,Giga?
+    uint32_t bandwidth_{0}; // return raw messages per result?
 };
 
 union ResultsSync
@@ -56,6 +66,9 @@ struct CycleTracker
     uint64_t saturation_{0};
     uint32_t polls_{0};
     uint32_t works_{0};
+
+    // There is intentional false sharing on this, however the impact is unmasurable
+    // as long as getResults is called infrequently, at most once every 10ms
     std::atomic<uint32_t> controlFlags_{0};
 
     CycleTracker() : results_(rs_.results_) {}
@@ -76,24 +89,32 @@ struct CycleTracker
         end();
         results_.saturationCycles_ = saturationCycles();
         results_.saturationRatio_ = saturationRatio();
-        results_.bandwidth_ = bandwidth();//(end_ - start_) * works_;
+        results_.bandwidth_ = bandwidth(1'000'000);//(end_ - start_) * works_;
     }
 
     Results getResults()
     {
-        start_ = end_ = getcc_ns();
         ResultsSync r;
+
+        // false sharing other thread
+        if (controlFlags_ & ControlFlags::Clear)
+        {
+            return r.results_;
+        }
+
+        start_ = end_ = getcc_ns();
         r = rs_;
         controlFlags_ |= ControlFlags::Clear;
         return r.results_;
     }
 
-    uint64_t bandwidth()
+    // one billion is once per second
+    // one millino is once per millisecond
+    // one thousand is once per microsecond
+    uint32_t bandwidth(uint32_t per = 1'000'000'000)
     {
-        // busy wait on clear flag
-        // 3 is CPU speed in GHz
-        // 1'000'000 is 1 ms
-        return (static_cast<float>((works_)*3.0*1'000'000) / (end_ - start_));//*g_precision;
+        // 3 is CPU speed in GHz (needs to be set per host)
+        return (static_cast<float>((works_)*3.0*per) / (end_ - start_));//*g_precision;
     }
 
     uint16_t saturationCycles()
@@ -107,7 +128,7 @@ struct CycleTracker
     uint16_t saturationRatio()
     {
         if (polls_)
-            return static_cast<uint16_t>((works_*g_precision) / polls_);
+            return static_cast<uint16_t>( (static_cast<float>(works_) / polls_) * g_precision );
         else
             return 0;
     }
@@ -116,7 +137,7 @@ struct CycleTracker
     {
         if (controlFlags_ & ControlFlags::Clear)
         {
-             
+            /* Debug information 
             std::cout << "Overhead = " << overhead_ << std::endl;
             std::cout << "Duty     = " << saturation_ << std::endl;
 
@@ -126,6 +147,7 @@ struct CycleTracker
             std::cout << "start_ = " << start_ << std::endl;
             std::cout << "end_   = " << end_ << std::endl;
             std::cout << "end_ - start_ = " << end_ - start_ << std::endl;
+            // */
 
             //std::cout << "Clearing" << std::endl;
             overhead_       = 0;
@@ -140,18 +162,12 @@ struct CycleTracker
     {
         overhead_ += o;
         ++polls_;
-
-        //overhead_.fetch_add(o, std::memory_order_acquire);
-        //polls_.fetch_add(1, std::memory_order_release);
     }
 
     void addDuty(uint64_t d)
     {
         saturation_ += d;
         ++works_;
-
-        //saturation_.fetch_add(d, std::memory_order_acquire);
-        //works_.fetch_add(1, std::memory_order_release);
     }
 
     struct CheckPoint
@@ -184,35 +200,8 @@ struct CycleTracker
     };
 };
 
-void observer ( CycleTracker& ct )
+void worker ( CycleTracker& ct, int work )
 {
-    for (int i = 0; i < 10; ++i)
-    {
-        Results r;
-        r = ct.getResults();
-
-        sleep(1);
-
-        std::cout << "Sizeof CycleTracker = " << sizeof(CycleTracker) << std::endl;
-        std::cout << "Sizeof Results = " << sizeof(Results) << std::endl;
-       
-        // need to make fetcher methods to hide the g_precision and ugly static_cast
-        std::cout << "saturation [Cycles] = " << static_cast<float>(r.saturationCycles_)/g_precision << std::endl;
-        std::cout << "saturation [Ratio] =  " << static_cast<float>(r.saturationRatio_)/g_precision << std::endl;
-        std::cout << "Bandwidth [work/ms] = " << static_cast<float>(r.bandwidth_)  << std::endl;
-
-        std::cout << "----" << std::endl << std::endl;
-
-        // after observation 
-        ct.clear();
-    }
-}
-
-int main ( int argc, char* argv[] )
-{
-    CycleTracker ct;
-    std::thread th(observer, std::ref(ct));
-
     ct.start();
     uint32_t i{0};
     for(;;)
@@ -221,6 +210,8 @@ int main ( int argc, char* argv[] )
         cp.markOne();
         if (!(i%3)) 
         {
+            for(int k = 0; k < 5; ++k)
+                getcc_ns();
             __builtin_ia32_pause(); // on failed poll
             cp.markTwo();
             ++i;
@@ -228,13 +219,63 @@ int main ( int argc, char* argv[] )
         }
         cp.markTwo();
 
-        for(int k = 0; k < 5000; ++k)
+        // simulate work
+        for(int k = 0; k < work; ++k)
             getcc_ns();
 
         ++i;
         cp.markThree();
     }
     ct.end();
+}
+
+int main ( int argc, char* argv[] )
+{
+    int work{50};
+
+    if (argc > 1)
+    {
+        work = atoi(argv[1]);
+    }
+
+    constexpr int nThreads = 10;
+    std::array<std::unique_ptr<std::thread>, nThreads> threads;
+
+    // this ends up being the point of contention
+    constexpr int align = 64;
+    std::array<Alignment<CycleTracker, align>, nThreads> cts;
+
+    for (int i = 0; i < nThreads; ++i)
+    {
+        threads[i] = std::make_unique<std::thread>(worker, std::ref(cts[i].get()), work);
+    }
+
+
+    for (;;)
+    {
+        sleep(1);
+
+        // begin observation
+        Results r[nThreads];
+        for (int i = 0; i < nThreads; ++i)
+        {
+            r[i] = cts[i].get().getResults();
+        }
+
+        for ( int i = 0; i < 10; ++i)
+        {
+
+            std::cout << "Sizeof CycleTracker = " << sizeof(CycleTracker) << std::endl;
+            std::cout << "Sizeof Results = " << sizeof(Results) << std::endl;
+           
+            // need to make fetcher methods to hide the g_precision and ugly static_cast
+            std::cout << "saturation [Cycles] = " << static_cast<float>(r[i].saturationCycles_)/g_precision << std::endl;
+            std::cout << "saturation [Ratio] =  " << static_cast<float>(r[i].saturationRatio_)/g_precision << std::endl;
+            std::cout << "Bandwidth [work/ms] = " << static_cast<float>(r[i].bandwidth_)  << std::endl;
+
+            std::cout << "----" << std::endl << std::endl;
+        }
+    }
 
   	return 0;
 }
