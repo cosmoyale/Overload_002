@@ -3,6 +3,7 @@
 #include <thread>
 #include <vector>
 #include <array>
+#include <new>
 #include <unistd.h>
 
 #include "getcc.h"
@@ -227,7 +228,7 @@ void worker ( CycleTracker& ct, ResultsSync& rs, int work )
     {
         CycleTracker::CheckPoint cp(ct, rs);
         cp.markOne();
-        if (!(i%3)) 
+        if ((i%5)) 
         {
             for(int k = 0; k < 5; ++k)
                 getcc_ns();
@@ -239,8 +240,12 @@ void worker ( CycleTracker& ct, ResultsSync& rs, int work )
         cp.markTwo();
 
         // simulate work
-        for(int k = 0; k < work; ++k)
-            getcc_ns();
+		uint64_t s = getcc_ns();
+        for(;;)
+		{
+            if(getcc_ns() - s > work)
+				break;
+		}
 
         ++i;
         cp.markThree();
@@ -345,7 +350,7 @@ void run (int work, int nThreads)
 		std::cout << "Sizeof CycleTracker = " << sizeof(CycleTracker) << std::endl;
 		std::cout << "Sizeof ResultSync = " << sizeof(ResultsSync) << std::endl;
 		std::cout << "Sizeof AlignedCycleTracker = " << sizeof(typename ThreadManager<Align>::AlignedCycleTracker_t) << std::endl;
-		std::cout << "Sizeof AlignedResultSync = " << sizeof(typename ThreadManager<Align>::AlignedCycleTracker_t) << std::endl;
+		std::cout << "Sizeof AlignedResultSync = " << sizeof(typename ThreadManager<Align>::AlignedResultsSync_t) << std::endl;
 		std::cout << "Sizeof Results = " << sizeof(Results) << std::endl;
 		std::cout << "Sizeof align = " << Align << std::endl;
 		std::cout << "Work = " << work << std::endl;
@@ -385,6 +390,8 @@ int main ( int argc, char* argv[] )
 		int align = atoi(argv[3]);
 
 		std::cout << "--- align = " << align << std::endl;
+
+		//std::hardware_destructive_interference_size //not available in gcc 7.1
 
 		if (align == 4)
 			run<4>(work, nThreads);
