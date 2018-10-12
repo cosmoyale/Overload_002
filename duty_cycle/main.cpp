@@ -56,10 +56,6 @@ struct CycleTracker
         , Readable  = 2
     };
 
-
-    ResultsSync rs_;
-    Results& results_{rs_.results_};
-
     uint64_t start_{0};
     uint64_t end_{0};
     uint64_t overhead_{0};
@@ -71,8 +67,7 @@ struct CycleTracker
     // as long as getResults is called infrequently, at most once every 10ms
     std::atomic<uint32_t> controlFlags_{0};
 
-    CycleTracker() : results_(rs_.results_) {}
-
+    CycleTracker() {}
 
     void start()
     {
@@ -84,29 +79,14 @@ struct CycleTracker
         end_ = getcc_ns();
     }
 
-    void calcResults()
+    void calcResults(ResultsSync& rs)
     {
         end();
-        results_.saturationCycles_ = saturationCycles();
-        results_.saturationRatio_ = saturationRatio();
-        results_.bandwidth_ = bandwidth(1'000'000);//(end_ - start_) * works_;
+        rs.results_.saturationCycles_ = saturationCycles();
+        rs.results_.saturationRatio_ = saturationRatio();
+        rs.results_.bandwidth_ = bandwidth(1'000'000);//(end_ - start_) * works_;
     }
 
-    Results getResults()
-    {
-        ResultsSync r;
-
-        // false sharing other thread
-        if (controlFlags_ & ControlFlags::Clear)
-        {
-            return r.results_;
-        }
-
-        start_ = end_ = getcc_ns();
-        r = rs_;
-        controlFlags_ |= ControlFlags::Clear;
-        return r.results_;
-    }
 
     // one billion is once per second
     // one millino is once per millisecond
@@ -170,9 +150,20 @@ struct CycleTracker
         ++works_;
     }
 
+	bool cleared()
+	{
+		return controlFlags_ & ControlFlags::Clear;
+	}
+
+	void setClear()
+	{
+        start_ = end_ = getcc_ns();
+		controlFlags_ |= ControlFlags::Clear;
+	}
+
     struct CheckPoint
     {
-        CheckPoint(CycleTracker& ct) : ct_(ct)
+        CheckPoint(CycleTracker& ct, ResultsSync& rs) : ct_(ct), rs_(rs)
         {
         }
 
@@ -185,7 +176,7 @@ struct CycleTracker
             if (p3_)
                 ct_.addDuty(p3_ - p2_);
 
-            ct_.calcResults();
+            ct_.calcResults(rs_);
         }
 
         void markOne() { p1_ = getcc_ns(); }
@@ -193,6 +184,7 @@ struct CycleTracker
         void markThree() { p3_ = getcc_ns(); }
 
         CycleTracker& ct_;
+        ResultsSync& rs_;
 
         uint64_t p1_{0};
         uint64_t p2_{0};
@@ -200,13 +192,40 @@ struct CycleTracker
     };
 };
 
-void worker ( CycleTracker& ct, int work )
+void setAffinity(	
+		  std::unique_ptr<std::thread>& t 
+		, uint32_t cpuid )
+{
+	cpu_set_t cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(cpuid, &cpuset);
+
+    int rc = pthread_setaffinity_np(
+			t->native_handle()
+			, sizeof(cpu_set_t)
+			, &cpuset);
+
+	std::cerr	<< "affinity " 
+				<< cpuid 
+				<< std::endl;
+
+	if (rc != 0) 
+	{
+		std::cerr << "Error calling "
+					 "pthread_setaffinity_np: "
+				  << rc 
+				  << "\n";
+		exit (0);
+	}
+}
+
+void worker ( CycleTracker& ct, ResultsSync& rs, int work )
 {
     ct.start();
     uint32_t i{0};
     for(;;)
     {
-        CycleTracker::CheckPoint cp(ct);
+        CycleTracker::CheckPoint cp(ct, rs);
         cp.markOne();
         if (!(i%3)) 
         {
@@ -229,27 +248,86 @@ void worker ( CycleTracker& ct, int work )
     ct.end();
 }
 
-int main ( int argc, char* argv[] )
+template <int Align>
+class ThreadManager
 {
-    int work{50};
+public:
+	using AlignedCycleTracker_t = Alignment<CycleTracker,Align>;
+	using AlignedResultsSync_t = Alignment<ResultsSync,Align>;
 
-    if (argc > 1)
+	ThreadManager(uint32_t nThreads) : nThreads_(nThreads)
+	{ 
+		// We want to be able to dynamically grow, thus *2?
+		threads_.reserve(nThreads*2);
+		cts_ = std::make_unique<AlignedCycleTracker_t[]>(nThreads*2);
+		rs_ = std::make_unique<AlignedResultsSync_t[]>(nThreads*2);
+	}
+
+	CycleTracker& getCT ( uint32_t n )
+	{
+		if (n >= nThreads_)
+		{
+			throw (std::runtime_error("n out of bounds"));
+		}
+
+		return cts_[n];
+	}
+
+	ResultsSync& getRS ( uint32_t n )
+	{
+		if (n >= nThreads_)
+		{
+			throw (std::runtime_error("n out of bounds"));
+		}
+
+		return rs_[n];
+	}
+
+	void launchThread ( uint32_t i, int work )
+	{
+		// race condition on cpuId_, ignore for now
+        threads_[i] = std::make_unique<std::thread>(worker, std::ref(cts_[i].get()), std::ref(rs_[i].get()), work);
+		setAffinity(threads_[i], cpuId_);
+		cpuId_ += 1;
+	}
+
+    Results getResults(uint32_t i)
     {
-        work = atoi(argv[1]);
+        ResultsSync r;
+
+        // false sharing other thread
+        if (cts_[i].get().cleared())
+        {
+            return r.results_;
+        }
+
+        r = rs_[i].get();
+        cts_[i].get().setClear();
+        return r.results_;
     }
 
-    constexpr int nThreads = 3;
-    std::array<std::unique_ptr<std::thread>, nThreads> threads;
+	ThreadManager() = delete;
+
+private:
+	uint32_t nThreads_{0};
+	uint32_t cpuId_{0};
+    std::vector<std::unique_ptr<std::thread>> threads_;
+	std::unique_ptr<AlignedCycleTracker_t[]> cts_;
+	std::unique_ptr<AlignedResultsSync_t[]> rs_;
+	
+};
+
+template <int Align>
+void run (int work, int nThreads)
+{
+	ThreadManager<Align> tm(nThreads);
 
     // this ends up being the point of contention
-    constexpr int align = 8;
-    std::array<Alignment<CycleTracker, align>, nThreads> cts;
 
     for (int i = 0; i < nThreads; ++i)
     {
-        threads[i] = std::make_unique<std::thread>(worker, std::ref(cts[i].get()), work);
+		tm.launchThread(i, work);
     }
-
 
     for (;;)
     {
@@ -259,14 +337,18 @@ int main ( int argc, char* argv[] )
         Results r[nThreads];
         for (int i = 0; i < nThreads; ++i)
         {
-            r[i] = cts[i].get().getResults();
+            r[i] = tm.getResults(i);
         }
 
 		uint64_t totalBandwidth{0};
 
 		std::cout << "Sizeof CycleTracker = " << sizeof(CycleTracker) << std::endl;
+		std::cout << "Sizeof ResultSync = " << sizeof(ResultsSync) << std::endl;
+		std::cout << "Sizeof AlignedCycleTracker = " << sizeof(typename ThreadManager<Align>::AlignedCycleTracker_t) << std::endl;
+		std::cout << "Sizeof AlignedResultSync = " << sizeof(typename ThreadManager<Align>::AlignedCycleTracker_t) << std::endl;
 		std::cout << "Sizeof Results = " << sizeof(Results) << std::endl;
-		std::cout << "Sizeof align = " << align << std::endl;
+		std::cout << "Sizeof align = " << Align << std::endl;
+		std::cout << "Work = " << work << std::endl;
            
         for ( int i = 0; i < nThreads; ++i)
         {
@@ -281,6 +363,41 @@ int main ( int argc, char* argv[] )
 		std::cout << "Total Bandwidth = " << totalBandwidth << std::endl;
 		std::cout << "----" << std::endl << std::endl;
     }
+
+}
+
+int main ( int argc, char* argv[] )
+{
+    int work{50};
+	int nThreads = 8;
+
+    if (argc > 1)
+    {
+        work = atoi(argv[1]);
+    }
+
+	if (argc > 2)
+		nThreads = atoi(argv[2]);
+
+
+	if (argc > 3)
+	{
+		int align = atoi(argv[3]);
+
+		std::cout << "--- align = " << align << std::endl;
+
+		if (align == 4)
+			run<4>(work, nThreads);
+		if (align == 8)
+			run<8>(work, nThreads);
+		if (align == 64)
+			run<64>(work, nThreads);
+	}
+	else
+	{
+		run<64>(work, nThreads);
+	}
+
 
   	return 0;
 }
