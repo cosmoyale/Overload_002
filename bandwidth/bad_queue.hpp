@@ -25,6 +25,8 @@
 
 #include <boost/lockfree/lockfree_forward.hpp>
 
+#include <iostream>
+
 #ifdef BOOST_HAS_PRAGMA_ONCE
 #pragma once
 #endif
@@ -134,6 +136,8 @@ private:
 
     void initialize(void)
     {
+		std::cout << "Size of node::T "<< sizeof(T) << ", " << alignof(T) << " " << 
+			(intptr_t)&tail_ - (intptr_t)&head_ << std::endl;
         node * n = pool.template construct<true, false>(pool.null_handle());
         tagged_node_handle dummy_node(pool.get_handle(n), 0);
         head_.store(dummy_node, memory_order_relaxed);

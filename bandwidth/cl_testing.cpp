@@ -154,7 +154,7 @@ void producer(Q* q, uint32_t iterations)
 
 		// busy work to throttle production 
 		// to eliminiate "stuffed" queue
-		//* No noticable effect
+		/* No noticable effect
 		for (uint32_t k = 0; k<1000; ++k)
 		{
 			result += k+i;
@@ -264,7 +264,7 @@ void run ( int producers, int consumers )
 	
 	threads.reserve(producers+consumers);
 
-	Q<T> q(128);
+	Q<T> q(8192);
 
 	// need to make this a command line option 
 	// and do proper balancing between 
@@ -412,8 +412,6 @@ int simpleTest ()
 	threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data.d4)));
 	setAffinity(*threads.rbegin(), 3);
 
-
-
 	for (;;)
 	{
 		sleep(1);
@@ -437,10 +435,7 @@ int simpleTest ()
 					<< ", d4 = " << d
 					<< ", total = " << a+b+c+d
 					<< std::endl;
-
 	}
-
-	// threads[] leaks but we ctrl-c to exit
 
 	return 0;
 }
