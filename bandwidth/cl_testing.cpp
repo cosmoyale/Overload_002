@@ -134,13 +134,20 @@ void producer(Q* q, uint32_t iterations)
 	d.get().serial = 0;
 
 	int result = 0;
+	bool work = false;
 
 	for ( uint32_t j = 0; j < 2; ++j) // warm up
 	for ( uint32_t i = 0; i < iterations; ++i)
 	{
 		++d.get().serial;
-		do { d.get().cycles = getcc_b();  } 
-			while (!q->push(d));
+		do 
+		{ 
+			d.get().cycles = getcc_b();
+			work = (q->push(d));
+			if(!work)
+				__builtin_ia32_pause();
+		} while (!work); 
+		
 		
 		store.get()[i] = 
 			getcc_e() - d.get().cycles;
@@ -178,12 +185,18 @@ void consumer(Q* q, uint32_t iterations)
 	T d;
 	uint64_t start;
 	uint64_t end;
+	bool work = false;
 
 	for ( uint32_t j = 0; j < 2; ++j) // warm up
 	for ( uint32_t i = 0; i < iterations; ++i)
 	{
-		do { start = getcc_b(); } 
-			while (!q->pop(d));
+		do 
+		{ 
+			start = getcc_b();
+			work = q->pop(d);
+			if (!work)
+				__builtin_ia32_pause();
+		} while (!work);
 
 		end = getcc_e();
 
@@ -267,7 +280,7 @@ void run ( int producers, int consumers )
 					, iterations));
 
 		// adjust for physical cpu/core layout
-		setAffinity(*threads.rbegin(), i*2);
+		setAffinity(*threads.rbegin(), i);
 	}
 	for (int i = 0; i < consumers; ++i)
 	{
@@ -278,7 +291,7 @@ void run ( int producers, int consumers )
 				 , iterations));
 
 		// adjust for physical cpu/core layout
-		setAffinity(*threads.rbegin(), 4+(i*2));
+		setAffinity(*threads.rbegin(), i+producers);
 	}
 
 	Thread::g_cstart.store(true);
@@ -354,25 +367,6 @@ int main ( int argc, char* argv[] )
 }
 
 
-struct DataTestNoCL
-{
-	std::atomic<uint32_t> d1{0};
-	std::atomic<uint32_t> d2{0};
-	std::atomic<uint32_t> d3{0};
-	std::atomic<uint32_t> d4{0};
-};
-
-struct DataTestCL
-{
-	std::atomic<uint32_t> d1{0};
-	uint32_t clpad_1[15];
-	std::atomic<uint32_t> d2{0};
-	uint32_t clpad_2[15];
-	std::atomic<uint32_t> d3{0};
-	uint32_t clpad_3[15];
-	std::atomic<uint32_t> d4{0};
-};
-
 template <int X>
 struct DataTest
 {
@@ -382,22 +376,6 @@ struct DataTest
 	alignas (X) std::atomic<uint32_t> d4{0};
 };
 
-// with no affinity I'm getting 2x performance increase
-// With the CL aware structure
-
-template <typename T>
-void CLTest ( T& data )
-{
-	for (;;)
-	{
-		++data.d1;
-		++data.d2;
-		++data.d3;
-		++data.d4;
-	}
-}
-
-template <int X>
 void CLTest ( std::atomic<uint32_t>& d )
 {
 	for (;;)
@@ -408,13 +386,15 @@ void CLTest ( std::atomic<uint32_t>& d )
 
 int simpleTest ()
 {
-	// Not sure what header file these are locaated
+	// Not sure what header file these are locaated, they are not in #include <new>
 	//std::cout << "std::hardware_destructive_interference_size = " << std::hardware_destructive_interference_size << std::endl;
 	//std::cout << "std::hardware_constructive_interference_size = " << std::hardware_constructive_interference_size << std::endl;
+	
+	// change 64 to 4 or 8 to see the degadated performance
+	constexpr int32_t align = 4;
 	constexpr int32_t num_threads = 4;
 
-	// change 64 to 4 or 8 to see the degadated performance
-	using DataType_t = DataTest<64>;
+	using DataType_t = DataTest<align>;
 	DataType_t data;
 
 
@@ -423,13 +403,13 @@ int simpleTest ()
 	
 	threads.reserve(num_threads);
 
-	threads.push_back(std::make_unique<std::thread>(CLTest<1>, std::ref(data.d1)));
+	threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data.d1)));
 	setAffinity(*threads.rbegin(), 0);
-	threads.push_back(std::make_unique<std::thread>(CLTest<1>, std::ref(data.d2)));
+	threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data.d2)));
 	setAffinity(*threads.rbegin(), 1);
-	threads.push_back(std::make_unique<std::thread>(CLTest<1>, std::ref(data.d3)));
+	threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data.d3)));
 	setAffinity(*threads.rbegin(), 2);
-	threads.push_back(std::make_unique<std::thread>(CLTest<1>, std::ref(data.d4)));
+	threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data.d4)));
 	setAffinity(*threads.rbegin(), 3);
 
 
@@ -438,17 +418,26 @@ int simpleTest ()
 	{
 		sleep(1);
 
+		uint32_t a, b, c, d;
+
+		a = data.d1.load(std::memory_order_acquire);
+		b = data.d2.load(std::memory_order_relaxed);
+		c = data.d3.load(std::memory_order_relaxed);
+		d = data.d4.load(std::memory_order_relaxed);
+
+		data.d1.store(0, std::memory_order_relaxed);
+		data.d2.store(0, std::memory_order_relaxed);
+		data.d3.store(0, std::memory_order_relaxed);
+		data.d4.store(0, std::memory_order_release);
+
 		std::cout	
-					<< "d1 = " << data.d1.load() 
-					<< ", d2 = " << data.d2.load() 
-					<< ", d3 = " << data.d3.load() 
-					<< ", d4 = " << data.d4.load() 
+					<< "d1 = " << a
+					<< ", d2 = " << b
+					<< ", d3 = " << c 
+					<< ", d4 = " << d
+					<< ", total = " << a+b+c+d
 					<< std::endl;
 
-		data.d1.store(0);
-		data.d2.store(0);
-		data.d3.store(0);
-		data.d4.store(0);
 	}
 
 	// threads[] leaks but we ctrl-c to exit
