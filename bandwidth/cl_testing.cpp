@@ -142,15 +142,15 @@ void producer(Q* q, uint32_t iterations)
 		++d.get().serial;
 		do 
 		{ 
-			d.get().cycles = getcc_b();
+			d.get().cycles = getcc_ns();
 			work = (q->push(d));
-			if(!work)
-				__builtin_ia32_pause();
+			//if(!work)
+			//	__builtin_ia32_pause();
 		} while (!work); 
 		
 		
 		store.get()[i] = 
-			getcc_e() - d.get().cycles;
+			getcc_ns() - d.get().cycles;
 
 		// busy work to throttle production 
 		// to eliminiate "stuffed" queue
@@ -192,13 +192,13 @@ void consumer(Q* q, uint32_t iterations)
 	{
 		do 
 		{ 
-			start = getcc_b();
+			start = getcc_ns();
 			work = q->pop(d);
-			if (!work)
-				__builtin_ia32_pause();
+			//if (!work)
+			//	__builtin_ia32_pause();
 		} while (!work);
 
-		end = getcc_e();
+		end = getcc_ns();
 
 		travel_store.get()[i] = 
 				end - d.get().cycles;
