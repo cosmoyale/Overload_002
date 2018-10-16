@@ -15,7 +15,8 @@
 #include "getcc.h"
 #include "bad_queue.hpp"
 
-int simpleTest();
+template <int Align>
+int simpleTest(const std::string& pc);
 
 // TODO better namespace name
 namespace Thread
@@ -253,7 +254,7 @@ void setAffinity(
 }
 
 template<typename T,template<class...>typename Q>
-void run ( int producers, int consumers )
+void run ( const std::string& pc )
 {
 	std::cout	<< "Alignment of T " 
 				<< alignof(T) 
@@ -262,7 +263,7 @@ void run ( int producers, int consumers )
 	std::vector<std::unique_ptr<std::thread>> 
 		threads;
 	
-	threads.reserve(producers+consumers);
+	threads.reserve(pc.length());
 
 	Q<T> q(8192);
 
@@ -271,28 +272,31 @@ void run ( int producers, int consumers )
 	// consumers and producers
 	uint32_t iterations = 10000000;
 
-	for (int i = 0; i < producers; ++i)
-	{
-		threads.push_back(
-				std::make_unique<std::thread>
-					 (producer<T,Q<T>>
-					, &q 
-					, iterations));
+    uint32_t core{0};
+    for (auto i : pc)
+    {
+        if (i == 'p')
+        {
+            threads.push_back(
+                    std::make_unique<std::thread>
+                    (producer<T,Q<T>>
+                     , &q 
+                     , iterations));
+            setAffinity(*threads.rbegin(), core);
+        }
+        else if (i == 'c')
+        {
+            threads.push_back(
+                    std::make_unique<std::thread>		  
+                    (consumer<T,Q<T>>
+                     , &q
+                     , iterations));
 
-		// adjust for physical cpu/core layout
-		setAffinity(*threads.rbegin(), i);
-	}
-	for (int i = 0; i < consumers; ++i)
-	{
-		threads.push_back(
-			std::make_unique<std::thread>		  
-				  (consumer<T,Q<T>>
-				 , &q
-				 , iterations));
-
-		// adjust for physical cpu/core layout
-		setAffinity(*threads.rbegin(), i+producers);
-	}
+            // adjust for physical cpu/core layout
+            setAffinity(*threads.rbegin(), core);
+        }
+        ++core;
+    }
 
 	Thread::g_cstart.store(true);
 	usleep(500000);
@@ -311,7 +315,7 @@ void run ( int producers, int consumers )
 
 int main ( int argc, char* argv[] )
 {
-	if (argc < 4)
+	if (argc < 3)
 	{
 		std::cout	<< "Usage: " 
 					<< argv[0] 
@@ -323,6 +327,23 @@ int main ( int argc, char* argv[] )
 		return 0;
 	}
 
+    std::string pc{argv[2]};
+
+    uint32_t core{0};
+    for (auto i : pc)
+    {
+        if (i == 'p')
+            std::cout << core << ":P ";
+        else if (i == 'c')
+            std::cout << core << ":C ";
+        else
+            std::cout << core << ":N ";
+
+        ++core;
+    }
+
+    std::cout << std::endl;
+
 	std::cout << "Compiler chosen Alignment of "
 				 "Benchmark is " 
 			  << alignof(Benchmark) 
@@ -330,17 +351,13 @@ int main ( int argc, char* argv[] )
 
 
 	std::string cl(argv[1]);
-	int producers = 
-		boost::lexical_cast<int>(argv[2]);
-	int consumers = 
-		boost::lexical_cast<int>(argv[3]);
-	
+		
 	if (cl == "cl")
 	{
 		run<Alignment<
 			  Benchmark, 64>
 			, boost::lockfree::queue> 
-				(producers, consumers);
+                (pc);
 	}
 	else if (cl == "nocl")
 	{
@@ -348,12 +365,17 @@ int main ( int argc, char* argv[] )
 			  Benchmark 
 			, alignof(Benchmark)>
 			, boost::lockfree::bad_queue>
-				(producers, consumers);
+                (pc);
 	}
-	else if (cl == "Simple")
+	else if (cl == "SimpleCL")
 	{
-		simpleTest();
+		simpleTest<64>(pc);
 	}
+	else if (cl == "SimpleNOCL")
+	{
+		simpleTest<4>(pc);
+	}
+
 	else
 	{
 		std::cout 
@@ -370,10 +392,7 @@ int main ( int argc, char* argv[] )
 template <int X>
 struct DataTest
 {
-	alignas (X) std::atomic<uint32_t> d1{0};
-	alignas (X) std::atomic<uint32_t> d2{0};
-	alignas (X) std::atomic<uint32_t> d3{0};
-	alignas (X) std::atomic<uint32_t> d4{0};
+	alignas (X) std::atomic<uint32_t> d{0};
 };
 
 void CLTest ( std::atomic<uint32_t>& d )
@@ -384,57 +403,64 @@ void CLTest ( std::atomic<uint32_t>& d )
 	}
 }
 
-int simpleTest ()
+template <int Align>
+int simpleTest (const std::string& pc)
 {
 	// Not sure what header file these are locaated, they are not in #include <new>
 	//std::cout << "std::hardware_destructive_interference_size = " << std::hardware_destructive_interference_size << std::endl;
 	//std::cout << "std::hardware_constructive_interference_size = " << std::hardware_constructive_interference_size << std::endl;
 	
 	// change 64 to 4 or 8 to see the degadated performance
-	constexpr int32_t align = 4;
-	constexpr int32_t num_threads = 4;
 
-	using DataType_t = DataTest<align>;
-	DataType_t data;
+	using DataType_t = DataTest<Align>;
+	DataType_t data[128];
 
+    std::cout << "Sizeof data = " << sizeof(data) << std::endl;
 
 	std::vector<std::unique_ptr<std::thread>> 
 		threads;
 	
-	threads.reserve(num_threads);
+	threads.reserve(pc.length());
 
-	threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data.d1)));
-	setAffinity(*threads.rbegin(), 0);
-	threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data.d2)));
-	setAffinity(*threads.rbegin(), 1);
-	threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data.d3)));
-	setAffinity(*threads.rbegin(), 2);
-	threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data.d4)));
-	setAffinity(*threads.rbegin(), 3);
+    int32_t core{0};
+    int32_t idx{0};
+    for(auto i : pc)
+    {
+        if (i == 'p')
+        {
+            threads.push_back(std::make_unique<std::thread>(CLTest, std::ref(data[idx].d)));
+            setAffinity(*threads.rbegin(), core);
+            ++idx;
+        }
+        ++core;
+    }
+    
+    auto counters = std::make_unique<uint32_t[]>(idx);
 
 	for (;;)
 	{
 		sleep(1);
 
-		uint32_t a, b, c, d;
+        int32_t i{0};
+        counters[i] = data[i].d.load(std::memory_order_acquire);
+		data[i].d.store(0, std::memory_order_relaxed);
+        for (i = 1; i < idx-1; ++i)
+        {
+            counters[i] = data[i].d.load(std::memory_order_relaxed);
+            data[i].d.store(0, std::memory_order_relaxed);
+        }
+        counters[i] = data[i].d.load(std::memory_order_relaxed);
+		data[i].d.store(0, std::memory_order_release);
 
-		a = data.d1.load(std::memory_order_acquire);
-		b = data.d2.load(std::memory_order_relaxed);
-		c = data.d3.load(std::memory_order_relaxed);
-		d = data.d4.load(std::memory_order_relaxed);
 
-		data.d1.store(0, std::memory_order_relaxed);
-		data.d2.store(0, std::memory_order_relaxed);
-		data.d3.store(0, std::memory_order_relaxed);
-		data.d4.store(0, std::memory_order_release);
-
-		std::cout	
-					<< "d1 = " << a
-					<< ", d2 = " << b
-					<< ", d3 = " << c 
-					<< ", d4 = " << d
-					<< ", total = " << a+b+c+d
-					<< std::endl;
+        uint64_t total{0};
+        for (int i = 0; i < idx; ++i)
+        {
+            std::cout << "d" << i << " = " << counters[i] << ", ";
+            total+= counters[i];
+        }
+        std::cout << ", total = " << total << ", avg = " << static_cast<float>(total) / idx << std::endl;
+        total = 0;
 	}
 
 	return 0;
