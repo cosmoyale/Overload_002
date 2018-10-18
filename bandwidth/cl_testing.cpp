@@ -57,6 +57,7 @@ struct Benchmark
 {
 	uint64_t cycles{0};
 	uint32_t serial{0};
+    uint32_t workIterations{0};
     uint32_t workCycles{0};
 };
 
@@ -65,6 +66,60 @@ struct Alignment
 {
 	alignas(X) Bench cb;
 	Bench& get() { return cb; }
+};
+
+// 1/2 cache line
+struct ReadWorkData
+{
+    enum Size : uint32_t { Elem = 8 };
+    std::atomic<uint32_t> data[Elem];
+};
+
+// 1/2 cache line
+struct WriteWorkData
+{
+    enum Size : uint32_t { Elem = 8 };
+    std::atomic<uint32_t> data[Elem];
+};
+
+template <int X>
+struct WorkData
+{
+    WorkData() 
+    { 
+        for (uint32_t i=0; i<ReadWorkData::Elem; ++i)
+            rwd.data[i].store(0);
+
+        for (uint32_t i=0; i<WriteWorkData::Elem; ++i)
+            wwd.data[i].store(0);
+    }
+
+    WorkData(const WorkData& wd)
+    {
+        if (&wd == this)
+            return;
+
+        rwd.data[0].store(wd.rwd.data[0].load(std::memory_order_acquire), std::memory_order_relaxed);
+        for (uint32_t i=1; i<ReadWorkData::Elem-1; ++i)
+            rwd.data[i].store(wd.rwd.data[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
+        rwd.data[ReadWorkData::Elem-1].store(wd.rwd.data[ReadWorkData::Elem-1].load(std::memory_order_relaxed), std::memory_order_release);
+    };
+
+    WorkData& operator=(const WorkData& wd)
+    {
+        if (&wd == this)
+            return *this;
+
+        wwd.data[0].store(wd.wwd.data[0].load(std::memory_order_acquire), std::memory_order_relaxed);
+        for (uint32_t i=1; i<ReadWorkData::Elem-1; ++i)
+            wwd.data[i].store(wd.wwd.data[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
+        wwd.data[ReadWorkData::Elem-1].store(wd.wwd.data[ReadWorkData::Elem-1].load(std::memory_order_relaxed), std::memory_order_release);
+
+        return *this;
+    }
+
+    alignas (X) ReadWorkData rwd;
+    alignas (X) WriteWorkData wwd;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -157,12 +212,18 @@ struct CycleTracker
     // one billion is once per second
     // one millino is once per millisecond
     // one thousand is once per microsecond
+    // works_ is the number of work unites executed this observation period.
+    // T1: Begin
     uint32_t bandwidth(uint32_t per = 1'000'000'000)
     {
         // 3 is CPU speed in GHz (needs to be set per host)
+        // per is observation timescale units
+        // end_ - start_ is the observation window.
         return (static_cast<float>((works_)*3.0*per) / (end_ - start_));//*g_precision;
     }
+    // T1: End
 
+    // T3: Begin
     uint16_t saturationCycles()
     {
         if (saturation_)
@@ -170,7 +231,9 @@ struct CycleTracker
         else
             return 0;
     }
+    // T3: Begin
 
+    // T2: Begin
     uint16_t saturationRatio()
     {
         if (polls_)
@@ -178,6 +241,7 @@ struct CycleTracker
         else
             return 0;
     }
+    // T2: End
 
     void clear()
     {
@@ -319,7 +383,7 @@ void genStats (   uint32_t iterations
 }
 
 template <typename T, typename Q>
-void producer(Q* q, uint32_t iterations, uint64_t workCycles)
+void producer(Q* q, uint32_t iterations, uint64_t workCycles, uint32_t workIterations)
 {
 	auto store = Thread::GetStore(iterations);
 
@@ -340,6 +404,7 @@ void producer(Q* q, uint32_t iterations, uint64_t workCycles)
 		{ 
 			d.get().cycles = getcc_ns();
 			d.get().workCycles = workCycles;
+			d.get().workIterations = workIterations;
 			work = (q->push(d));
 			if(!work)
 				__builtin_ia32_pause();
@@ -357,6 +422,8 @@ void producer(Q* q, uint32_t iterations, uint64_t workCycles)
 			result += k+i;
 		}
 		// */
+        uint64_t start = getcc_ns(); // reusing start
+        while (getcc_ns() - start < 600){} // 100ns on 3GHz CPU.
 	}
 	++result;
 
@@ -370,8 +437,9 @@ void producer(Q* q, uint32_t iterations, uint64_t workCycles)
 	Thread::g_output.emplace(push.str());
 }
 
-template <typename T, typename Q>
-void consumer(Q* q, uint32_t iterations, ResultsSync& rs, CycleTracker& ct)
+// EX2: Begin
+template <typename T, typename Q, typename WD>
+void consumer(Q* q, int32_t iterations, ResultsSync& rs, CycleTracker& ct, WD& wd)
 {
 	auto store = Thread::GetStore(iterations);
 	auto travel_store = 
@@ -387,18 +455,23 @@ void consumer(Q* q, uint32_t iterations, ResultsSync& rs, CycleTracker& ct)
 	for ( uint32_t j = 0; j < 2; ++j) // warm up
     {
         ct.start();
-        for ( uint32_t i = 0; i < iterations; ++i)
+        for ( int32_t i = 0; i < iterations; ++i)
         {
             CycleTracker::CheckPoint cp(ct, rs);
             cp.markOne(); // roll into CheckPoint constructor?
-            do 
-            { 
+            //do 
+            //{ 
                 start = getcc_ns();
                 work = q->pop(d);
                 if (!work)
+                {
+                    cp.markTwo();
                     __builtin_ia32_pause();
+                    --i;
+                    continue;
+                }
                 cp.markTwo();
-            } while (!work);
+            //} while (!work);
 
             end = getcc_ns();
 
@@ -407,7 +480,15 @@ void consumer(Q* q, uint32_t iterations, ResultsSync& rs, CycleTracker& ct)
 
             store.get()[i] = end - start;
 
-            while (getcc_ns() - start < d.get().workCycles){}
+            for (uint32_t k = 0; k < d.get().workIterations; k++)
+            {
+                // simulate work
+                WD local_wd(wd);
+                while (getcc_ns() - start < d.get().workCycles){}
+
+                for (uint32_t it = 0; it < WriteWorkData::Elem; ++it)
+                   wd.wwd.data[it]++;
+            }
             cp.markThree();
         }
     }
@@ -430,6 +511,7 @@ void consumer(Q* q, uint32_t iterations, ResultsSync& rs, CycleTracker& ct)
 	Thread::g_output.emplace(pop.str());
 	Thread::g_output.emplace(trvl.str());
 }
+// EX3: Begin
 
 void setAffinity(	
 		  std::unique_ptr<std::thread>& t 
@@ -459,8 +541,11 @@ void setAffinity(
 }
 
 template<typename T,template<class...>typename Q>
-void run ( const std::string& pc, uint64_t workCycles )
+void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
 {
+    using WD_t = WorkData<alignof(T)>;
+    WD_t wd;
+
 	std::cout	<< "Alignment of T " 
 				<< alignof(T) 
 				<< std::endl;
@@ -473,7 +558,7 @@ void run ( const std::string& pc, uint64_t workCycles )
     auto rs = std::make_unique<Alignment<ResultsSync, alignof(T)>[]>(pc.length());
     auto ct = std::make_unique<Alignment<CycleTracker, alignof(T)>[]>(pc.length());
 
-	Q<T> q(8192);
+	Q<T> q(128);
 
 	// need to make this a command line option 
 	// and do proper balancing between 
@@ -491,18 +576,20 @@ void run ( const std::string& pc, uint64_t workCycles )
                     (producer<T,Q<T>>
                      , &q 
                      , iterations
-                     , workCycles));
+                     , workCycles
+                     , workIterations));
             setAffinity(*threads.rbegin(), core);
         }
         else if (i == 'c')
         {
             threads.push_back(
                     std::make_unique<std::thread>		  
-                    (consumer<T,Q<T>>
+                    (consumer<T,Q<T>,WD_t>
                      , &q
                      , iterations
                      , std::ref(rs[index].get())
-                     , std::ref(ct[index].get())));
+                     , std::ref(ct[index].get())
+                     , std::ref(wd)));
 
             // adjust for physical cpu/core layout
             setAffinity(*threads.rbegin(), core);
@@ -527,10 +614,12 @@ void run ( const std::string& pc, uint64_t workCycles )
         for ( uint32_t i = 0; i < index; ++i)
         {
             // need to make fetcher methods to hide the g_precision and ugly static_cast
+            // T1 Begin
             std::cout << "saturation [Cycles] = " << static_cast<float>(results[i].saturationCycles_)/g_precision << std::endl;
             std::cout << "saturation [Ratio] =  " << static_cast<float>(results[i].saturationRatio_)/g_precision << std::endl;
             std::cout << "Bandwidth [work/ms] = " << static_cast<float>(results[i].bandwidth_)  << std::endl;
             totalBandwidth += results[i].bandwidth_;
+            // T1 End
         }
         std::cout << "Total Bandwidth = " << totalBandwidth << std::endl;
         std::cout << "----" << std::endl << std::endl;
@@ -542,8 +631,6 @@ void run ( const std::string& pc, uint64_t workCycles )
 	{
 		i->join();
 	}
-
-
 
 
 	for (auto& i : Thread::g_output)
@@ -560,7 +647,8 @@ int main ( int argc, char* argv[] )
 					<< argv[0] 
 					<< " <cl|nocl|SimpleCL|SimpleNOCL> "
 					"<producer/consumer string (01ppcc67)> " 
-                    "[optional] <work cycles> "
+                    "[optional] <work cycles> default=6000"
+                    "[optional] <work iterations> default=10"
 					<< std::endl;
 		return 0;
 	}
@@ -569,6 +657,12 @@ int main ( int argc, char* argv[] )
 
     if (argc >= 4)
         workCycles = atoi(argv[3]);
+
+    uint32_t workIterations = 10; // 2us on 3GHz box
+
+    if (argc >= 5)
+        workIterations = atoi(argv[4]);
+
 
     std::string pc{argv[2]};
 
@@ -602,7 +696,7 @@ int main ( int argc, char* argv[] )
 		run<Alignment<
 			  Benchmark, 64>
 			, boost::lockfree::queue> 
-                (pc, workCycles);
+                (pc, workCycles, workIterations);
 	}
 	else if (cl == "nocl")
 	{
@@ -610,7 +704,7 @@ int main ( int argc, char* argv[] )
 			  Benchmark 
 			, alignof(Benchmark)>
 			, boost::lockfree::bad_queue>
-                (pc, workCycles);
+                (pc, workCycles, workIterations);
 	}
 	else if (cl == "SimpleCL")
 	{
@@ -633,7 +727,7 @@ int main ( int argc, char* argv[] )
 	return 0;
 }
 
-
+// EX1: Begin
 template <int X>
 struct DataTest
 {
@@ -710,3 +804,4 @@ int simpleTest (const std::string& pc)
 
 	return 0;
 }
+// EX1: End
