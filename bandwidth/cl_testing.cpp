@@ -19,6 +19,7 @@ template <int Align>
 int simpleTest(const std::string& pc);
 
 constexpr uint32_t g_precision = 10000;
+constexpr float     g_CPUGHzSpeed = 3.0;
 
 // TODO better namespace name
 namespace Thread
@@ -26,37 +27,9 @@ namespace Thread
 std::atomic<bool> g_pstart(false);
 std::atomic<bool> g_cstart(false);
 
-std::set<std::string> g_output;
-
-std::unique_ptr<uint64_t>
-	GetStore ( uint64_t iter )
-{
-	thread_local uint64_t* store{nullptr};
-
-	if (store == nullptr)
-		store = new uint64_t[iter];
-
-	return std::unique_ptr<uint64_t>(store);
-}
-
-std::unique_ptr<uint64_t> 
-	GetTravelStore ( uint64_t iter )
-{
-	thread_local uint64_t* store{nullptr};
-
-	if (store == nullptr)
-		store = new uint64_t[iter];
-
-	return std::unique_ptr<uint64_t>(store);
-}
-
-std::mutex g_cout_lock;
-
 }
 struct Benchmark
 {
-	uint64_t cycles{0};
-	uint32_t serial{0};
     uint32_t workIterations{0};
     uint32_t workCycles{0};
 };
@@ -99,10 +72,8 @@ struct WorkData
         if (&wd == this)
             return;
 
-        rwd.data[0].store(wd.rwd.data[0].load(std::memory_order_acquire), std::memory_order_relaxed);
-        for (uint32_t i=1; i<ReadWorkData::Elem-1; ++i)
+        for (uint32_t i=0; i<ReadWorkData::Elem; ++i)
             rwd.data[i].store(wd.rwd.data[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
-        rwd.data[ReadWorkData::Elem-1].store(wd.rwd.data[ReadWorkData::Elem-1].load(std::memory_order_relaxed), std::memory_order_release);
     };
 
     WorkData& operator=(const WorkData& wd)
@@ -110,10 +81,8 @@ struct WorkData
         if (&wd == this)
             return *this;
 
-        wwd.data[0].store(wd.wwd.data[0].load(std::memory_order_acquire), std::memory_order_relaxed);
-        for (uint32_t i=1; i<ReadWorkData::Elem-1; ++i)
+        for (uint32_t i=0; i<ReadWorkData::Elem; ++i)
             wwd.data[i].store(wd.wwd.data[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
-        wwd.data[ReadWorkData::Elem-1].store(wd.wwd.data[ReadWorkData::Elem-1].load(std::memory_order_relaxed), std::memory_order_release);
 
         return *this;
     }
@@ -170,7 +139,8 @@ struct CycleTracker
     uint32_t works_{0};
 
     // There is intentional false sharing on this, however the impact is unmasurable
-    // as long as getResults is called infrequently, at most once every 10ms
+    // as long as getResults is called infrequently
+    // for the purpose of monitoring we will update this once a second
     std::atomic<uint32_t> controlFlags_{0};
 
     CycleTracker() {}
@@ -219,7 +189,7 @@ struct CycleTracker
         // 3 is CPU speed in GHz (needs to be set per host)
         // per is observation timescale units
         // end_ - start_ is the observation window.
-        return (static_cast<float>((works_)*3.0*per) / (end_ - start_));//*g_precision;
+        return (static_cast<float>(works_) / ((end_ - start_)/(g_CPUGHzSpeed*per)));//*g_precision;
     }
     // T1: End
 
@@ -323,195 +293,100 @@ struct CycleTracker
 };
 ///////////////////////////////////////////////////////////////////////////////
 
-template <typename T>
-void genStats (   uint32_t iterations
-				, T& data
-				, const std::string& tag
-				, std::ostream& os)
-{
-	uint64_t min = 9999999999999;
-	uint64_t max = 0;
-	double avg = 0;
-	double sdev = 0;
-
-	auto cycle_hist = data.get();
-	std::sort(cycle_hist, cycle_hist+iterations);
-	for (uint32_t i = 0; i < iterations; ++i)
-	{
-		min = std::min(cycle_hist[i], min);
-		max = std::max(cycle_hist[i], max);
-		avg += cycle_hist[i];
-	}
-
-	avg /= iterations;
-
-	for (uint32_t i = 0; i < iterations; ++i)
-	{
-		double d =
-			static_cast<double>(cycle_hist[i]) 
-			- avg;
-
-		sdev += d*d;
-	}
-
-	sdev /= iterations;
-	double std_dev = sqrt(sdev);
-
-	int p90th = iterations *0.9;
-	int p99th = iterations *0.99;
-	int p992th = iterations *0.992;
-	int p994th = iterations *0.994;
-	int p998th = iterations *0.998;
-	int p999th = iterations *0.999;
-
-	os	<< tag << ": "
-		<< iterations
-		<< " avg cyc = " << avg 
-		<< ", min = " << min
-		<< ", max = " << max 
-		<< ", avg = " << avg
-		<< ", stddev = " << std_dev
-
-		<< ", 90th = " << cycle_hist[p90th]
-		<< ", 99th = " << cycle_hist[p99th]
-		<< ", 99.2th = " << cycle_hist[p992th]
-		<< ", 99.4th = " << cycle_hist[p994th]
-		<< ", 99.8th = " << cycle_hist[p998th]
-		<< ", 99.9th = " << cycle_hist[p999th]
-		<< ", max = " << 
-			cycle_hist[iterations-1];
-}
-
 template <typename T, typename Q>
 void producer(Q* q, uint32_t iterations, uint64_t workCycles, uint32_t workIterations)
 {
-	auto store = Thread::GetStore(iterations);
-
 	while (Thread::g_pstart.load() == false) {}
 
 	T d;
 
-	d.get().serial = 0;
+    d.get().workCycles = workCycles;
+    d.get().workIterations = workIterations;
 
-	int result = 0;
 	bool work = false;
 
-	for ( uint32_t j = 0; j < 2; ++j) // warm up
 	for ( uint32_t i = 0; i < iterations; ++i)
 	{
-		++d.get().serial;
 		do 
 		{ 
-			d.get().cycles = getcc_ns();
-			d.get().workCycles = workCycles;
-			d.get().workIterations = workIterations;
 			work = (q->push(d));
 			if(!work)
 				__builtin_ia32_pause();
 		} while (!work); 
 		
-		
-		store.get()[i] = 
-			getcc_ns() - d.get().cycles;
-
-		// busy work to throttle production 
-		// to eliminiate "stuffed" queue
-		/* No noticable effect
-		for (uint32_t k = 0; k<1000; ++k)
-		{
-			result += k+i;
-		}
-		// */
-        uint64_t start = getcc_ns(); // reusing start
-        while (getcc_ns() - start < 600){} // 100ns on 3GHz CPU.
+        uint64_t start = getcc_ns(); 
+        while (getcc_ns() - start < 600){} // 200ns on 3GHz CPU.
 	}
-	++result;
-
-	std::stringstream push;
-	genStats(iterations, store, "1 Push", push);
-
-	std::lock_guard<std::mutex> 
-		lock(Thread::g_cout_lock);
-	
-	std::cout << result << std::endl;
-	Thread::g_output.emplace(push.str());
 }
 
 // EX2: Begin
 template <typename T, typename Q, typename WD>
 void consumer(Q* q, int32_t iterations, ResultsSync& rs, CycleTracker& ct, WD& wd)
 {
-	auto store = Thread::GetStore(iterations);
-	auto travel_store = 
-		Thread::GetTravelStore(iterations);
-
 	while (Thread::g_cstart.load() == false) {}
 
 	T d;
 	uint64_t start;
-	uint64_t end;
 	bool work = false;
 
-	for ( uint32_t j = 0; j < 2; ++j) // warm up
+    ct.start();
+    for (;;)
     {
-        ct.start();
-        for ( int32_t i = 0; i < iterations; ++i)
+        CycleTracker::CheckPoint cp(ct, rs);
+        cp.markOne(); // roll into CheckPoint constructor?
+
+        start = getcc_ns();
+        work = q->pop(d);
+        if (!work)
         {
-            CycleTracker::CheckPoint cp(ct, rs);
-            cp.markOne(); // roll into CheckPoint constructor?
-            //do 
-            //{ 
-                start = getcc_ns();
-                work = q->pop(d);
-                if (!work)
-                {
-                    cp.markTwo();
-                    __builtin_ia32_pause();
-                    --i;
-                    continue;
-                }
-                cp.markTwo();
-            //} while (!work);
-
-            end = getcc_ns();
-
-            travel_store.get()[i] = 
-                end - d.get().cycles;
-
-            store.get()[i] = end - start;
-
-            for (uint32_t k = 0; k < d.get().workIterations; k++)
-            {
-                // simulate work
-                WD local_wd(wd);
-                while (getcc_ns() - start < d.get().workCycles){}
-
-                for (uint32_t it = 0; it < WriteWorkData::Elem; ++it)
-                   wd.wwd.data[it]++;
-            }
-            cp.markThree();
+            cp.markTwo();
+            __builtin_ia32_pause();
+            continue;
         }
+        cp.markTwo();
+
+        // simulate work
+        for (uint32_t k = 0; k < d.get().workIterations; k++)
+        {
+            for (uint32_t it = 0; it < WriteWorkData::Elem; ++it)
+            {
+                // get a local copy of data
+                WD local_wd(wd);
+                // simulate work on data
+                while (getcc_ns() - start < d.get().workCycles){}
+                // simulate writing results
+                wd.wwd.data[it]++;
+            }
+        }
+        cp.markThree();
     }
-
-	std::stringstream trvl, pop;
-	
-	genStats(	iterations, 
-				travel_store, 
-				"3 Travel", 
-				trvl);
-
-	genStats(	iterations, 
-				store, 
-				"2 Pop", 
-				pop);
-
-	std::lock_guard<std::mutex> 
-		lock(Thread::g_cout_lock);
-	
-	Thread::g_output.emplace(pop.str());
-	Thread::g_output.emplace(trvl.str());
 }
 // EX3: Begin
+//
+template <typename WD>
+void worker(WD& wd)
+{
+    std::cout << "Launched worker" << std::endl;
+    // simulate work
+    uint32_t producer_results[WriteWorkData::Elem];
+    for (;;)
+    {
+        for (uint32_t it = 0; it < WriteWorkData::Elem; ++it)
+        {
+            // simulate consuming producers results
+            producer_results[it] = wd.wwd.data[it].load();
+        }
+
+        // simulate processing on results from producers
+        uint64_t start = getcc_ns();
+        while (getcc_ns() - start < 900){} // 300ns on 3GHz CPU
+        for (uint32_t it = 0; it < ReadWorkData::Elem; ++it)
+        {
+            // simulate writing for producers to consume
+            wd.rwd.data[it] =  producer_results[it];
+        }
+    }
+}
 
 void setAffinity(	
 		  std::unique_ptr<std::thread>& t 
@@ -595,6 +470,17 @@ void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
             setAffinity(*threads.rbegin(), core);
             ++index;
         }
+        else if (i == 'w')
+        {
+            threads.push_back(
+                    std::make_unique<std::thread>		  
+                    (worker<WD_t>, 
+                     std::ref(wd)));
+
+            // adjust for physical cpu/core layout
+            setAffinity(*threads.rbegin(), core);
+        }
+
         ++core;
     }
 
@@ -611,6 +497,9 @@ void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
             results[i] = ct[i].get().getResults(rs[i].get(), true);
 
         uint64_t totalBandwidth{0};
+        std::cout << "----" << std::endl;
+        std::cout << "workCycles = " << workCycles << std::endl;
+        std::cout << "workIterations = " << workIterations << std::endl;
         for ( uint32_t i = 0; i < index; ++i)
         {
             // need to make fetcher methods to hide the g_precision and ugly static_cast
@@ -630,12 +519,6 @@ void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
 	for (auto& i : threads)
 	{
 		i->join();
-	}
-
-
-	for (auto& i : Thread::g_output)
-	{
-		std::cout << i << std::endl;
 	}
 }
 
@@ -658,7 +541,7 @@ int main ( int argc, char* argv[] )
     if (argc >= 4)
         workCycles = atoi(argv[3]);
 
-    uint32_t workIterations = 10; // 2us on 3GHz box
+    uint32_t workIterations = 10; 
 
     if (argc >= 5)
         workIterations = atoi(argv[4]);
