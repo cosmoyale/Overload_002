@@ -100,6 +100,14 @@ struct Results
     uint32_t bandwidth_{0}; // return raw messages per result?
     uint16_t saturationCycles_{0};
     uint16_t saturationRatio_{0};
+    
+	// using this always returns 0
+	//float saturationRatio_{0};
+
+	
+	auto saturationCycles() { return static_cast<float>(saturationCycles_)/g_precision; }
+	auto saturationRatio() { return static_cast<float>(saturationRatio_)/g_precision; }
+	auto bandwidth() { return bandwidth_; }
 };
 
 union ResultsSync
@@ -314,8 +322,8 @@ void producer(Q* q, uint32_t iterations, uint64_t workCycles, uint32_t workItera
 				__builtin_ia32_pause();
 		} while (!work); 
 		
-        uint64_t start = getcc_ns(); 
-        while (getcc_ns() - start < 600){} // 200ns on 3GHz CPU.
+        //uint64_t start = getcc_ns(); 
+        //while (getcc_ns() - start < 119600){} // 200ns on 3GHz CPU.
 	}
 }
 
@@ -348,10 +356,10 @@ void consumer(Q* q, int32_t iterations, ResultsSync& rs, CycleTracker& ct, WD& w
         // simulate work
         for (uint32_t k = 0; k < d.get().workIterations; k++)
         {
+			// get a local copy of data
+			WD local_wd(wd);
             for (uint32_t it = 0; it < WriteWorkData::Elem; ++it)
             {
-                // get a local copy of data
-                WD local_wd(wd);
                 // simulate work on data
                 while (getcc_ns() - start < d.get().workCycles){}
                 // simulate writing results
@@ -504,10 +512,10 @@ void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
         {
             // need to make fetcher methods to hide the g_precision and ugly static_cast
             // T1 Begin
-            std::cout << "saturation [Cycles] = " << static_cast<float>(results[i].saturationCycles_)/g_precision << std::endl;
-            std::cout << "saturation [Ratio] =  " << static_cast<float>(results[i].saturationRatio_)/g_precision << std::endl;
-            std::cout << "Bandwidth [work/ms] = " << static_cast<float>(results[i].bandwidth_)  << std::endl;
-            totalBandwidth += results[i].bandwidth_;
+            std::cout << "saturation [Cycles] = " << results[i].saturationCycles() << std::endl;
+            std::cout << "saturation [Ratio] =  " << results[i].saturationRatio() << std::endl;
+            std::cout << "Bandwidth [work/ms] = " << results[i].bandwidth() << std::endl;
+            totalBandwidth += results[i].bandwidth();
             // T1 End
         }
         std::cout << "Total Bandwidth = " << totalBandwidth << std::endl;
@@ -664,15 +672,11 @@ int simpleTest (const std::string& pc)
 		sleep(1);
 
         int32_t i{0};
-        counters[i] = data[i].d.load(std::memory_order_acquire);
-		data[i].d.store(0, std::memory_order_relaxed);
-        for (i = 1; i < idx-1; ++i)
+        for (i = 0; i < idx; ++i)
         {
-            counters[i] = data[i].d.load(std::memory_order_relaxed);
-            data[i].d.store(0, std::memory_order_relaxed);
+            counters[i] = data[i].d.load();
+            data[i].d.store(0);
         }
-        counters[i] = data[i].d.load(std::memory_order_relaxed);
-		data[i].d.store(0, std::memory_order_release);
 
 
         uint64_t total{0};
