@@ -18,7 +18,6 @@
 template <int Align>
 int simpleTest(const std::string& pc);
 
-constexpr uint32_t g_precision = 10000;
 constexpr float     g_CPUGHzSpeed = 3.0;
 
 // TODO better namespace name
@@ -94,8 +93,11 @@ struct WorkData
 ///////////////////////////////////////////////////////////////////////////////
 // Duty cycle, saturation, testing
 ///////////////////////////////////////////////////////////////////////////////
+//  Packed into 8 bytes to allow for one atomic copy.
 struct Results
 {
+    static constexpr uint32_t Precision = 10000;
+
     Results() {}
     uint32_t bandwidth_{0}; // return raw messages per result?
     uint16_t saturationCycles_{0};
@@ -105,11 +107,12 @@ struct Results
 	//float saturationRatio_{0};
 
 	
-	auto saturationCycles() { return static_cast<float>(saturationCycles_)/g_precision; }
-	auto saturationRatio() { return static_cast<float>(saturationRatio_)/g_precision; }
+	auto saturationCycles() { return static_cast<float>(saturationCycles_)/Precision; }
+	auto saturationRatio() { return static_cast<float>(saturationRatio_)/Precision; }
 	auto bandwidth() { return bandwidth_; }
 };
 
+// used to faciliate an atomic copy when needed and regular access when not needed.
 union ResultsSync
 {
     alignas(sizeof(uint64_t)) Results results_;
@@ -168,7 +171,7 @@ struct CycleTracker
         end();
         rs.results_.saturationCycles_ = saturationCycles();
         rs.results_.saturationRatio_ = saturationRatio();
-        rs.results_.bandwidth_ = bandwidth(1'000'000);//(end_ - start_) * works_;
+        rs.results_.bandwidth_ = bandwidth(1'000'000'000);//(end_ - start_) * works_;
     }
 
     Results getResults(ResultsSync& rs, bool reset = true)
@@ -197,7 +200,7 @@ struct CycleTracker
         // 3 is CPU speed in GHz (needs to be set per host)
         // per is observation timescale units
         // end_ - start_ is the observation window.
-        return (static_cast<float>(works_) / ((end_ - start_)/(g_CPUGHzSpeed*per)));//*g_precision;
+        return (static_cast<float>(works_) / ((end_ - start_)/(g_CPUGHzSpeed*per)) );
     }
     // T1: End
 
@@ -205,7 +208,7 @@ struct CycleTracker
     uint16_t saturationCycles()
     {
         if (saturation_)
-            return static_cast<uint16_t>(   (static_cast<float>(saturation_) / (saturation_ + overhead_))* g_precision    );
+            return static_cast<uint16_t>(   (static_cast<float>(saturation_) / (saturation_ + overhead_))* Results::Precision    );
         else
             return 0;
     }
@@ -215,7 +218,7 @@ struct CycleTracker
     uint16_t saturationRatio()
     {
         if (polls_)
-            return static_cast<uint16_t>( (static_cast<float>(works_) / polls_) * g_precision );
+            return static_cast<uint16_t>( (static_cast<float>(works_) / polls_) * Results::Precision );
         else
             return 0;
     }
@@ -320,10 +323,11 @@ void producer(Q* q, uint32_t iterations, uint64_t workCycles, uint32_t workItera
 			work = (q->push(d));
 			if(!work)
 				__builtin_ia32_pause();
+
+            uint64_t start = getcc_ns(); 
+            while (getcc_ns() - start < 6000){} // 2us on 3GHz CPU.
 		} while (!work); 
 		
-        //uint64_t start = getcc_ns(); 
-        //while (getcc_ns() - start < 119600){} // 200ns on 3GHz CPU.
 	}
 }
 
@@ -354,15 +358,23 @@ void consumer(Q* q, int32_t iterations, ResultsSync& rs, CycleTracker& ct, WD& w
         cp.markTwo();
 
         // simulate work
+        // When cache aligned WD occupies 2 cache lines 
+        // rather than one, removing 
+        // the false sharing from the read
         for (uint32_t k = 0; k < d.get().workIterations; k++)
         {
 			// get a local copy of data
 			WD local_wd(wd);
+            // simulate work on data
+            while (getcc_ns() - start < d.get().workCycles){}
             for (uint32_t it = 0; it < WriteWorkData::Elem; ++it)
             {
-                // simulate work on data
-                while (getcc_ns() - start < d.get().workCycles){}
                 // simulate writing results
+                // This is false sharing, which
+                // cannot be avoided at times
+                // The intent is to show the 
+                // separation of the read and
+                // write data
                 wd.wwd.data[it]++;
             }
         }
@@ -427,17 +439,29 @@ template<typename T,template<class...>typename Q>
 void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
 {
     using WD_t = WorkData<alignof(T)>;
+    // shared data amongst producers
     WD_t wd;
 
 	std::cout	<< "Alignment of T " 
 				<< alignof(T) 
 				<< std::endl;
 
+    std::cout   << "Size of CycleTracker "
+                << sizeof(CycleTracker)
+                << std::endl;
+
+    std::cout   << "Size of ResultsSync "
+                << sizeof(ResultsSync)
+                << std::endl;
+
 	std::vector<std::unique_ptr<std::thread>> 
 		threads;
 	
 	threads.reserve(pc.length());
 
+    // reserve enough of each for total number possible threads
+    // They will be packed together causing false sharing unless
+    // aligned to the cache-line.
     auto rs = std::make_unique<Alignment<ResultsSync, alignof(T)>[]>(pc.length());
     auto ct = std::make_unique<Alignment<CycleTracker, alignof(T)>[]>(pc.length());
 
@@ -473,10 +497,10 @@ void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
                      , std::ref(rs[index].get())
                      , std::ref(ct[index].get())
                      , std::ref(wd)));
+            ++index;
 
             // adjust for physical cpu/core layout
             setAffinity(*threads.rbegin(), core);
-            ++index;
         }
         else if (i == 'w')
         {
@@ -510,11 +534,10 @@ void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
         std::cout << "workIterations = " << workIterations << std::endl;
         for ( uint32_t i = 0; i < index; ++i)
         {
-            // need to make fetcher methods to hide the g_precision and ugly static_cast
             // T1 Begin
-            std::cout << "saturation [Cycles] = " << results[i].saturationCycles() << std::endl;
-            std::cout << "saturation [Ratio] =  " << results[i].saturationRatio() << std::endl;
-            std::cout << "Bandwidth [work/ms] = " << results[i].bandwidth() << std::endl;
+            std::cout << "Temporal: saturation [Cycles] = " << results[i].saturationCycles() << std::endl;
+            std::cout << "Temporal: saturation [Ratio] =  " << results[i].saturationRatio() << std::endl;
+            std::cout << "Spatial: Bandwidth [work/sec] = " << results[i].bandwidth() << std::endl;
             totalBandwidth += results[i].bandwidth();
             // T1 End
         }
