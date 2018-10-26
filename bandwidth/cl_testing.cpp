@@ -14,6 +14,7 @@
 
 #include "getcc.h"
 #include "bad_queue.hpp"
+#include "boost_queue.hpp"
 
 template <int Align>
 int simpleTest(const std::string& pc);
@@ -168,10 +169,18 @@ struct CycleTracker
 
     void calcResults(ResultsSync& rs)
     {
+		ResultsSync r;
+
         end();
-        rs.results_.saturationCycles_ = saturationCycles();
-        rs.results_.saturationRatio_ = saturationRatio();
-        rs.results_.bandwidth_ = bandwidth(1'000'000'000);//(end_ - start_) * works_;
+
+        r.results_.saturationCycles_ = saturationCycles();
+        r.results_.saturationRatio_ = saturationRatio();
+        r.results_.bandwidth_ = bandwidth(1'000'000'000);//(end_ - start_) * works_;
+
+		// 1 atomic operation rather than 3
+		// all 3 updated at same time
+		// avoiding race condition
+		rs = r;
     }
 
     Results getResults(ResultsSync& rs, bool reset = true)
@@ -324,8 +333,8 @@ void producer(Q* q, uint32_t iterations, uint64_t workCycles, uint32_t workItera
 			if(!work)
 				__builtin_ia32_pause();
 
-            uint64_t start = getcc_ns(); 
-            while (getcc_ns() - start < 6000){} // 2us on 3GHz CPU.
+            //uint64_t start = getcc_ns(); 
+            //while (getcc_ns() - start < 6000){} // 2us on 3GHz CPU.
 		} while (!work); 
 		
 	}
@@ -610,6 +619,7 @@ int main ( int argc, char* argv[] )
 		run<Alignment<
 			  Benchmark, 64>
 			, boost::lockfree::queue> 
+			//, boost::lockfree::gqueue> 
                 (pc, workCycles, workIterations);
 	}
 	else if (cl == "nocl")
@@ -617,7 +627,8 @@ int main ( int argc, char* argv[] )
 		run<Alignment<
 			  Benchmark 
 			, alignof(Benchmark)>
-			, boost::lockfree::bad_queue>
+			, boost::lockfree::gqueue> 
+			//, boost::lockfree::bad_queue>
                 (pc, workCycles, workIterations);
 	}
 	else if (cl == "SimpleCL")
