@@ -627,8 +627,8 @@ int main ( int argc, char* argv[] )
 		run<Alignment<
 			  Benchmark 
 			, alignof(Benchmark)>
-			, boost::lockfree::gqueue> 
-			//, boost::lockfree::bad_queue>
+			//, boost::lockfree::gqueue> 
+			, boost::lockfree::bad_queue>
                 (pc, workCycles, workIterations);
 	}
 	else if (cl == "SimpleCL")
