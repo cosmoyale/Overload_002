@@ -319,7 +319,7 @@ struct CycleTracker
     uint64_t p3_{0};
   };
 };
-///////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////
 
 // [include]
 template <typename T, typename Q>
@@ -426,7 +426,8 @@ void worker(WD& wd)
     uint64_t start = getcc_ns();
     // 300ns on 3GHz CPU
     while (getcc_ns() - start < 900){} 
-    for (uint32_t it = 0; it < ReadWorkData::Elem; ++it)
+    for (uint32_t it = 0; 
+        it < ReadWorkData::Elem; ++it)
     {
       // simulate writing for producers to consume
       wd.rwd.data[it] =  producer_results[it];
@@ -487,11 +488,17 @@ void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
 
   threads.reserve(pc.length());
 
-  // reserve enough of each for total number possible threads
-  // They will be packed together causing false sharing unless
-  // aligned to the cache-line.
-  auto rs = std::make_unique<Alignment<ResultsSync, alignof(T)>[]>(pc.length());
-  auto ct = std::make_unique<Alignment<CycleTracker, alignof(T)>[]>(pc.length());
+  // reserve enough of each for total number
+  // possible threads
+  // They will be packed together causing false
+  // sharing unless aligned to the cache-line.
+  auto rs = 
+    std::make_unique<Alignment<ResultsSync,
+      alignof(T)>[]>(pc.length());
+  
+  auto ct = 
+      std::make_unique<Alignment<CycleTracker,
+      alignof(T)>[]>(pc.length());
 
   Q<T> q(128);
 
@@ -581,9 +588,9 @@ void run ( const std::string& pc, uint64_t workCycles, uint32_t workIterations )
       totalBandwidth += results[i].bandwidth();
       // T1 End
     }
-    std::cout << "Total Bandwidth = " << totalBandwidth << std::endl;
-    std::cout << "----" << std::endl << std::endl;
-
+    std::cout << "Total Bandwidth = " 
+              << totalBandwidth << std::endl;
+    std::cout << "----\n" << std::endl;
   }
 
 
@@ -652,7 +659,8 @@ int main ( int argc, char* argv[] )
   {
     run<Alignment<
       Benchmark
-      , hardware_destructive_interference_size>
+      , fut_std::
+        hardware_destructive_interference_size>
       , boost::lockfree::queue> 
       (pc, workCycles, workIterations);
   }
